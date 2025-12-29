@@ -3,10 +3,13 @@ import pLimit from "p-limit";
 import { encodeKey, FileItem } from "../FileGrid";
 import { TransferTask } from "./transferQueue";
 
+// NEW: auth wrappers
+import { authFetch, authXhrFetch } from "../auth";
+
 const WEBDAV_ENDPOINT = "/webdav/";
 
 export async function fetchPath(path: string) {
-  const res = await fetch(`${WEBDAV_ENDPOINT}${encodeKey(path)}`, {
+  const res = await authFetch(`${WEBDAV_ENDPOINT}${encodeKey(path)}`, {
     method: "PROPFIND",
     headers: { Depth: "1" },
   });
@@ -111,42 +114,13 @@ export async function blobDigest(blob: Blob) {
 
 export const SIZE_LIMIT = 100 * 1000 * 1000; // 100MB
 
-function xhrFetch(
+// NEW: use auth-enabled XHR wrapper (keeps upload progress + adds Authorization)
+const xhrFetch = authXhrFetch as unknown as (
   url: RequestInfo | URL,
   requestInit: RequestInit & {
     onUploadProgress?: (progressEvent: ProgressEvent) => void;
   }
-) {
-  return new Promise<Response>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.upload.onprogress = requestInit.onUploadProgress ?? null;
-    xhr.open(
-      requestInit.method ?? "GET",
-      url instanceof Request ? url.url : url
-    );
-    const headers = new Headers(requestInit.headers);
-    headers.forEach((value, key) => xhr.setRequestHeader(key, value));
-    xhr.onload = () => {
-      const headers = xhr
-        .getAllResponseHeaders()
-        .trim()
-        .split("\r\n")
-        .reduce((acc, header) => {
-          const [key, value] = header.split(": ");
-          acc[key] = value;
-          return acc;
-        }, {} as Record<string, string>);
-      resolve(new Response(xhr.responseText, { status: xhr.status, headers }));
-    };
-    xhr.onerror = reject;
-    if (
-      requestInit.body instanceof Blob ||
-      typeof requestInit.body === "string"
-    ) {
-      xhr.send(requestInit.body);
-    }
-  });
-}
+) => Promise<Response>;
 
 export async function multipartUpload(
   key: string,
@@ -162,7 +136,7 @@ export async function multipartUpload(
   const headers = options?.headers || {};
   headers["content-type"] = file.type;
 
-  const uploadResponse = await fetch(`/webdav/${encodeKey(key)}?uploads`, {
+  const uploadResponse = await authFetch(`/webdav/${encodeKey(key)}?uploads`, {
     headers,
     method: "POST",
   });
@@ -211,10 +185,12 @@ export async function multipartUpload(
   );
   const uploadedParts = await Promise.all(promises);
   const completeParams = new URLSearchParams({ uploadId });
-  const response = await fetch(`/webdav/${encodeKey(key)}?${completeParams}`, {
+
+  const response = await authFetch(`/webdav/${encodeKey(key)}?${completeParams}`, {
     method: "POST",
     body: JSON.stringify({ parts: uploadedParts }),
   });
+
   if (!response.ok) throw new Error(await response.text());
   return response;
 }
@@ -225,7 +201,7 @@ export async function copyPaste(source: string, target: string, move = false) {
     `${WEBDAV_ENDPOINT}${encodeKey(target)}`,
     window.location.href
   );
-  await fetch(uploadUrl, {
+  await authFetch(uploadUrl, {
     method: move ? "MOVE" : "COPY",
     headers: { Destination: destinationUrl.href },
   });
@@ -241,7 +217,7 @@ export async function createFolder(cwd: string) {
     }
     const folderKey = `${cwd}${folderName}`;
     const uploadUrl = `${WEBDAV_ENDPOINT}${encodeKey(folderKey)}`;
-    await fetch(uploadUrl, { method: "MKCOL" });
+    await authFetch(uploadUrl, { method: "MKCOL" });
   } catch (error) {
     console.log(`Create folder failed`);
   }
@@ -269,7 +245,7 @@ export async function processTransferTask({
 
       const thumbnailUploadUrl = `/webdav/_$flaredrive$/thumbnails/${digestHex}.png`;
       try {
-        await fetch(thumbnailUploadUrl, {
+        await authFetch(thumbnailUploadUrl, {
           method: "PUT",
           body: thumbnailBlob,
         });
@@ -284,6 +260,7 @@ export async function processTransferTask({
 
   const headers: { "fd-thumbnail"?: string } = {};
   if (thumbnailDigest) headers["fd-thumbnail"] = thumbnailDigest;
+
   if (file.size >= SIZE_LIMIT) {
     return await multipartUpload(remoteKey, file, {
       headers,
